@@ -7,7 +7,11 @@ const {
   isFileNode,
   createNodeIdWithVersion,
 } = require(`./normalize`)
-const { handleReferences, handleWebhookUpdate } = require(`./utils`)
+const {
+  handleReferences,
+  handleWebhookUpdate,
+  fetchLanguageConfig,
+} = require(`./utils`)
 
 const asyncPool = require(`tiny-async-pool`)
 const bodyParser = require(`body-parser`)
@@ -55,8 +59,44 @@ exports.sourceNodes = async (
     skipFileDownloads,
     fastBuilds,
     entityReferenceRevisions = [],
+    translation,
   } = pluginOptions
   const { createNode, setPluginStatus, touchNode } = actions
+
+  // Default apiBase to `jsonapi`
+  apiBase = apiBase || `jsonapi`
+
+  // Default disallowedLinkTypes to self, describedby.
+  disallowedLinkTypes = disallowedLinkTypes || [`self`, `describedby`]
+
+  // Default concurrentFileRequests to `20`
+  concurrentFileRequests = concurrentFileRequests || 20
+
+  // Default skipFileDownloads to false.
+  skipFileDownloads = skipFileDownloads || false
+
+  // Determine what entities can be translated and what languages are enabled.
+  let languageConfig = store.getState().status.plugins?.[`gatsby-source-drupal`]
+    ?.languageConfig
+
+  if (!languageConfig) {
+    languageConfig = await fetchLanguageConfig({
+      translation,
+      baseUrl,
+      apiBase,
+      basicAuth,
+      headers,
+      params,
+    })
+
+    if (translation && !languageConfig.enabledLanguages.length) {
+      reporter.warn(
+        `The translation option is enabled but no enabled languages were retrieved from Drupal. Make sure your basicAuth credentials in the Gatsby config file are populated with a user that has the "administer languages" permission.`
+      )
+    }
+  }
+
+  setPluginStatus({ languageConfig })
 
   if (webhookBody && Object.keys(webhookBody).length) {
     const changesActivity = reporter.activityTimer(
@@ -100,6 +140,7 @@ exports.sourceNodes = async (
             getNode,
             reporter,
             store,
+            languageConfig,
           },
           pluginOptions
         )
@@ -157,7 +198,7 @@ exports.sourceNodes = async (
               getNode(
                 createNodeId(
                   createNodeIdWithVersion(
-                    nodeSyncData.id,
+                    `${nodeSyncData.langcode}${nodeSyncData.id}`,
                     nodeSyncData.type,
                     nodeSyncData.attributes?.drupal_internal__revision_id,
                     entityReferenceRevisions
@@ -185,6 +226,7 @@ exports.sourceNodes = async (
                   getNode,
                   reporter,
                   store,
+                  languageConfig,
                 },
                 pluginOptions
               )
@@ -210,18 +252,6 @@ exports.sourceNodes = async (
     `Fetch all data from Drupal`
   )
 
-  // Default apiBase to `jsonapi`
-  apiBase = apiBase || `jsonapi`
-
-  // Default disallowedLinkTypes to self, describedby.
-  disallowedLinkTypes = disallowedLinkTypes || [`self`, `describedby`]
-
-  // Default concurrentFileRequests to `20`
-  concurrentFileRequests = concurrentFileRequests || 20
-
-  // Default skipFileDownloads to false.
-  skipFileDownloads = skipFileDownloads || false
-
   // Fetch articles.
   reporter.info(`Starting to fetch all data from Drupal`)
 
@@ -239,6 +269,12 @@ exports.sourceNodes = async (
         if (disallowedLinkTypes.includes(type)) return
         if (!url) return
         if (!type) return
+
+        // Lookup this type in our list of language alterable entities.
+        const isTranslatable = languageConfig.translatableEntities.some(
+          entity => entity.id === type
+        )
+
         const getNext = async (url, data = []) => {
           if (typeof url === `object`) {
             // url can be string or object containing href field
@@ -286,7 +322,21 @@ exports.sourceNodes = async (
           return data
         }
 
-        const data = await getNext(url)
+        let data = []
+        if (isTranslatable === false) {
+          data = await getNext(url)
+        } else {
+          for (let i = 0; i < languageConfig.enabledLanguages.length; i++) {
+            let currentLanguage = languageConfig.enabledLanguages[i]
+            const urlPath = url.href.split(`${apiBase}/`).pop()
+            const baseUrlWithoutTrailingSlash = baseUrl.replace(/\/$/, ``)
+            let dataForLanguage = await getNext(
+              `${baseUrlWithoutTrailingSlash}/${currentLanguage}/${apiBase}/${urlPath}`
+            )
+
+            data = data.concat(dataForLanguage)
+          }
+        }
 
         const result = {
           type,

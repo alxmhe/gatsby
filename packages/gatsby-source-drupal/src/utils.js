@@ -1,19 +1,95 @@
 const _ = require(`lodash`)
+const axios = require(`axios`)
 const {
   nodeFromData,
   downloadFile,
   isFileNode,
   createNodeIdWithVersion,
+  getHref,
 } = require(`./normalize`)
 
 const backRefsNamesLookup = new WeakMap()
 const referencedNodesLookup = new WeakMap()
+
+const fetchLanguageConfig = async ({
+  translation,
+  baseUrl,
+  apiBase,
+  basicAuth,
+  headers,
+  params,
+}) => {
+  if (!translation) {
+    return {
+      defaultLanguage: `und`,
+      enabledLanguages: [`und`],
+      translatableEntities: [],
+    }
+  }
+
+  let next = `${baseUrl}/${apiBase}/configurable_language/configurable_language?sort=weight`
+  let availableLanguagesResponses = []
+  let translatableEntitiesResponses = []
+
+  while (next) {
+    const response = await axios.get(next, {
+      auth: basicAuth,
+      headers,
+      params,
+    })
+
+    availableLanguagesResponses = availableLanguagesResponses.concat(
+      response.data.data
+    )
+    next = getHref(response.data.links.next)
+  }
+
+  next = `${baseUrl}/${apiBase}/language_content_settings/language_content_settings?filter[language_alterable]=true`
+  while (next) {
+    const response = await axios.get(next, {
+      auth: basicAuth,
+      headers,
+      params,
+    })
+
+    translatableEntitiesResponses = translatableEntitiesResponses.concat(
+      response.data.data
+    )
+    next = getHref(response.data.links.next)
+  }
+
+  const enabledLanguages = availableLanguagesResponses
+    .filter(
+      language =>
+        [`und`, `zxx`].indexOf(language.attributes.drupal_internal__id) === -1
+    )
+    .map(language => language.attributes.drupal_internal__id)
+
+  const defaultLanguage = enabledLanguages[0]
+
+  const translatableEntities = translatableEntitiesResponses.map(entity => {
+    return {
+      type: entity.attributes.target_entity_type_id,
+      bundle: entity.attributes.target_bundle,
+      id: `${entity.attributes.target_entity_type_id}--${entity.attributes.target_bundle}`,
+    }
+  })
+
+  return {
+    defaultLanguage,
+    enabledLanguages,
+    translatableEntities,
+  }
+}
+
+exports.fetchLanguageConfig = fetchLanguageConfig
 
 const handleReferences = (
   node,
   { getNode, createNodeId, entityReferenceRevisions = [] }
 ) => {
   const relationships = node.relationships
+  const rootNodeLanguage = node.langcode
 
   if (node.drupal_relationships) {
     const referencedNodes = []
@@ -25,7 +101,7 @@ const handleReferences = (
           v.data.map(data => {
             const referencedNodeId = createNodeId(
               createNodeIdWithVersion(
-                data.id,
+                `${rootNodeLanguage}${data.id}`,
                 data.type,
                 data.meta?.target_version,
                 entityReferenceRevisions
@@ -52,7 +128,7 @@ const handleReferences = (
       } else {
         const referencedNodeId = createNodeId(
           createNodeIdWithVersion(
-            v.data.id,
+            `${rootNodeLanguage}${v.data.id}`,
             v.data.type,
             v.data.meta?.target_revision_id,
             entityReferenceRevisions

@@ -1,14 +1,24 @@
 const { URL } = require(`url`)
 const { createRemoteFileNode } = require(`gatsby-source-filesystem`)
 
+const getHref = link => {
+  if (typeof link === `object`) {
+    return link.href
+  }
+  return link
+}
+
+exports.getHref = getHref
+
 const nodeFromData = (datum, createNodeId, entityReferenceRevisions = []) => {
   const { attributes: { id: attributeId, ...attributes } = {} } = datum
   const preservedId =
     typeof attributeId !== `undefined` ? { _attributes_id: attributeId } : {}
+  const langcode = attributes.langcode || `und`
   return {
     id: createNodeId(
       createNodeIdWithVersion(
-        datum.id,
+        `${langcode}${datum.id}`,
         datum.type,
         attributes.drupal_internal__revision_id,
         entityReferenceRevisions
@@ -77,9 +87,9 @@ exports.downloadFile = async (
     const auth =
       typeof basicAuth === `object` && basicAuthFileSystems.includes(fileType)
         ? {
-            htaccess_user: basicAuth.username,
-            htaccess_pass: basicAuth.password,
-          }
+          htaccess_user: basicAuth.username,
+          htaccess_pass: basicAuth.password,
+        }
         : {}
     const fileNode = await createRemoteFileNode({
       url: url.href,
